@@ -1,6 +1,6 @@
 # UGG-Unbiased-Graph-Generator
 
-This is the code for the paper "Unbiased Graph Generator: Treatment-Intervened Graph Generation with Latent Diffusion Models". 
+This is the code for the paper "Mitigating Topology Bias in Graph Diffusion via Counterfactual Intervention". 
 
 ## Requirements
 
