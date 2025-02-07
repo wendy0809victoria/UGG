@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from utils import load_data, accuracy,load_pokec
-from models.FairGNN import FairGNN
+from models.ncGNN import ncGNN
 
 # Training settings
 parser = argparse.ArgumentParser()
