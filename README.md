@@ -21,6 +21,7 @@ python main.py
 ```
 
 ### Generate Synthetic Graph
+```
 python nba-gen-whole.py
 ```
 
