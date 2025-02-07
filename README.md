@@ -14,18 +14,17 @@ numpy~=1.22.2
 
 We include four datasets: **NBA**, **German**, **Pokec-n** and **Pokec-z**. Raw data are uploaded to ```./raw_data``` folder. We have constructed subgraphs from the raw data and subgraph data files are stored in ```./data``` folder. You can also reconstruct subgraph data by running ```python ./raw_data/subgraph.py --dataset_name```, and the results will be automatically stored in ```./data/dataset_name``` folder. 
 
-## Run the Code
-### Train FairGDiff (Default: NBA dataset)
+## Run the Code (Default: NBA dataset)
+### Train FairGDiff
 ```
 python main.py
 ```
 
-### Generate Synthetic Graph (Default: NBA dataset)
-```
+### Generate Synthetic Graph
 python nba-gen-whole.py
 ```
 
-### Evaluate Synthetic Graphs via Node Classification (Default: NBA dataset)
+### Evaluate Synthetic Graphs via Node Classification
 Under /src directory
 ```
 python train_fairGNN.py \
