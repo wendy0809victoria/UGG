@@ -15,6 +15,10 @@ numpy~=1.22.2
 We include four datasets: **NBA**, **German**, **Pokec-n** and **Pokec-z**. Raw data are uploaded to ```./raw_data``` folder. We have constructed subgraphs from the raw data and subgraph data files are stored in ```./data``` folder. You can also reconstruct subgraph data by running ```python ./raw_data/subgraph.py --dataset_name```, and the results will be automatically stored in ```./data/dataset_name``` folder. 
 
 ## Run the Code
+### Train FairGDiff
+```
+python main.py
+```
 
 ## Citation
 Please check our paper for technical details and full results. If you find this repo useful for your research, please consider citing the paper. 
