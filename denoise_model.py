@@ -2,8 +2,9 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from autoencoder import GIN_cond, GIN, VariationalAutoEncoder
-from torch_geometric.data import Data
+
+from torch_geometric.nn import GINConv, GCNConv, GraphConv, PNAConv
+from torch_geometric.nn import global_add_pool
 
 def extract(a, t, x_shape):
     batch_size = t.shape[0]
@@ -25,15 +26,12 @@ def q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noi
 
 
 # Loss function for denoising
-def p_losses(denoise_model, x_start, t, feat, cond, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=None, loss_type="l1"):
+def p_losses(denoise_model, x_start, t, cond, feat, data, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=None, loss_type="l1"):
     if noise is None:
         noise = torch.randn_like(x_start)
 
     x_noisy = q_sample(x_start, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod, noise=noise)
-    # print(f'x_noisy: {x_noisy.shape}')    # x_noisy: torch.Size([256, 32])
-    # print(f't: {t.shape}')                # t: torch.Size([256])
-    # print(f'cond: {cond.shape}')          # cond: torch.Size([256, 48])
-    predicted_noise = denoise_model(x_noisy, t, feat, cond)
+    predicted_noise = denoise_model(x_noisy, t, cond, feat, data)
 
     if loss_type == 'l1':
         loss = F.l1_loss(noise, predicted_noise)
@@ -65,37 +63,64 @@ class SinusoidalPositionEmbeddings(nn.Module):
         embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
         return embeddings
 
+class DenoiseGIN(torch.nn.Module):
+    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
+        super().__init__()
+        self.dropout = dropout
+        
+        self.convs = torch.nn.ModuleList()
+        self.convs.append(GINConv(nn.Sequential(nn.Linear(input_dim, hidden_dim),  
+                            nn.LeakyReLU(0.2),
+                            nn.BatchNorm1d(hidden_dim),
+                            nn.Linear(hidden_dim, hidden_dim), 
+                            nn.LeakyReLU(0.2))
+                            ))                        
+        for layer in range(n_layers-1):
+            self.convs.append(GINConv(nn.Sequential(nn.Linear(hidden_dim, hidden_dim),  
+                            nn.LeakyReLU(0.2),
+                            nn.BatchNorm1d(hidden_dim),
+                            nn.Linear(hidden_dim, hidden_dim), 
+                            nn.LeakyReLU(0.2))
+                            )) 
+
+        self.bn = nn.BatchNorm1d(hidden_dim)
+        self.fc = nn.Linear(hidden_dim, latent_dim)
+        
+
+    def forward(self, edge_index, x, data):
+
+        for conv in self.convs:
+            x = conv(x, edge_index)
+            x = F.dropout(x, self.dropout, training=self.training)
+
+        out = global_add_pool(x, data.batch)
+        out = self.bn(out)
+        out = self.fc(out)
+        return out
 
 # Denoise model
 class DenoiseNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, n_layers, n_cond, d_cond):
+    def __init__(self, feat_num, input_dim, hidden_dim, n_layers, n_cond, d_cond):
         super(DenoiseNN, self).__init__()
         self.n_layers = n_layers
-        # self.n_cond = n_cond
-        self.n_cond = 95
-        #self.d_cond = d_cond
-        self.d_cond = 32
-        # self.cond_mlp = nn.Sequential(
-            # nn.Linear(self.n_cond, d_cond),
-            # nn.ReLU(),
-            # nn.Linear(d_cond, d_cond),
-        # )
-        
-        self.cond_mlp = VariationalAutoEncoder(95, 64, 256, 32, 2, 3, 100)
-        
+        self.n_cond = 32
+        self.d_cond = 1
+        self.cond_mlp = nn.Sequential(
+            nn.Linear(self.n_cond, self.d_cond),
+            nn.ReLU(),
+            nn.Linear(self.d_cond, self.d_cond),
+        )
         self.time_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
-
-        # mlp_layers = [nn.Linear(input_dim+d_cond, hidden_dim)] + [nn.Linear(hidden_dim+d_cond, hidden_dim) for i in range(n_layers-2)]
-        # mlp_layers = [nn.Linear(input_dim+self.d_cond, hidden_dim)] + [nn.Linear(hidden_dim+self.d_cond, hidden_dim) for i in range(n_layers-2)]
-        # mlp_layers = [nn.Linear(input_dim+self.n_cond, hidden_dim)] + [nn.Linear(hidden_dim+self.n_cond, hidden_dim) for i in range(n_layers-2)]
-        # mlp_layers = [nn.Linear(input_dim, hidden_dim)] + [nn.Linear(hidden_dim, hidden_dim) for i in range(n_layers-2)]
+        
+        mlp_layers = [nn.Linear(input_dim+self.n_cond, hidden_dim)] + [nn.Linear(hidden_dim+self.n_cond, hidden_dim) for i in range(n_layers-2)] # with guidance
         
         mlp_layers.append(nn.Linear(hidden_dim, input_dim))
+        
         self.mlp = nn.ModuleList(mlp_layers)
 
         bn_layers = [nn.BatchNorm1d(hidden_dim) for i in range(n_layers-1)]
@@ -103,25 +128,14 @@ class DenoiseNN(nn.Module):
 
         self.relu = nn.ReLU()
         self.tanh = nn.Tanh()
-
+        
+        self.encoder = DenoiseGIN(feat_num, self.n_cond, self.n_cond, 2)
     
-    def forward(self, x, t, feat, cond):
-        # print(f'cond before: {cond.shape}') # [2, 17979]
-        # print(f'feat before: {feat.shape}') # [500, 95]
-        # print(f'x before: {x.shape}') # [5, 32] 
-        # cond = torch.reshape(cond, (-1, self.n_cond))
-        # cond = torch.reshape(cond, (-1, self.n_cond))
-        # cond = torch.nan_to_num(cond, nan=-100.0)
-        # cond = self.cond_mlp.encode(Data(x=feat, edge_index=cond))
-        # print(f'cond after: {cond.shape}')
+    def forward(self, x, t, cond, feat, data):
         t = self.time_mlp(t)
         for i in range(self.n_layers-1):
-            # print(f'x before: {x.shape}')
-            # print(f'cond before: {cond.shape}')
-            # cond = cond.squeeze(-1)
-            # print(f'cond after: {cond.shape}')
-            x = torch.cat((x, cond), dim=1)
-            # print(f'x after: {x.shape}')
+            x_cond = self.encoder(cond, feat, data) 
+            x = torch.cat((x, x_cond), dim=1) 
             x = self.relu(self.mlp[i](x))+t
             x = self.bn[i](x)
         x = self.mlp[self.n_layers-1](x)
@@ -129,7 +143,7 @@ class DenoiseNN(nn.Module):
 
 
 @torch.no_grad()
-def p_sample(model, x, t, feat, cond, t_index, betas):
+def p_sample(model, x, t, cond, feat, data, t_index, betas):
     # define alphas
     alphas = 1. - betas
     alphas_cumprod = torch.cumprod(alphas, axis=0)
@@ -152,10 +166,8 @@ def p_sample(model, x, t, feat, cond, t_index, betas):
     # Equation 11 in the paper
     # Use our model (noise predictor) to predict the mean
     model_mean = sqrt_recip_alphas_t * (
-        x - betas_t * model(x, t, feat, cond) / sqrt_one_minus_alphas_cumprod_t
+        x - betas_t * model(x, t, cond, feat, data) / sqrt_one_minus_alphas_cumprod_t
     )
-    
-    # def forward(self, x, t, feat, cond):
 
     if t_index == 0:
         return model_mean
@@ -167,7 +179,7 @@ def p_sample(model, x, t, feat, cond, t_index, betas):
 
 # Algorithm 2 (including returning all images)
 @torch.no_grad()
-def p_sample_loop(model, feat, cond, timesteps, betas, shape):
+def p_sample_loop(model, cond, feat, data, timesteps, betas, shape):
     device = next(model.parameters()).device
 
     b = shape[0]
@@ -176,11 +188,11 @@ def p_sample_loop(model, feat, cond, timesteps, betas, shape):
     imgs = []
 
     for i in reversed(range(0, timesteps)):
-        img = p_sample(model, img, torch.full((b,), i, device=device, dtype=torch.long), feat, cond, i, betas)
+        img = p_sample(model, img, torch.full((b,), i, device=device, dtype=torch.long), cond, feat, data, i, betas)
         imgs.append(img)
         #imgs.append(img.cpu().numpy())
     return imgs
 
 @torch.no_grad()
-def sample(model, feat, cond, latent_dim, timesteps, betas, batch_size):
-    return p_sample_loop(model, feat, cond, timesteps, betas, shape=(batch_size, latent_dim))
+def sample(model, cond, feat, data, latent_dim, timesteps, betas, batch_size):
+    return p_sample_loop(model, cond, feat, data, timesteps, betas, shape=(batch_size, latent_dim))

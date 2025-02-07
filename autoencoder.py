@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from torch_geometric.nn import GINConv, GCNConv, GraphConv, PNAConv
 from torch_geometric.nn import global_add_pool
+from torch_geometric.data import Data
 # from ppgn import Powerful
 
 # Decoder
@@ -39,7 +40,7 @@ class GIN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
         super().__init__()
         self.dropout = dropout
-        print(input_dim, hidden_dim, latent_dim, n_layers)
+        
         self.convs = torch.nn.ModuleList()
         self.convs.append(GINConv(nn.Sequential(nn.Linear(input_dim, hidden_dim),  
                             nn.LeakyReLU(0.2),
@@ -60,65 +61,19 @@ class GIN(torch.nn.Module):
         
 
     def forward(self, data):
-        edge_index = data.edge_index
+        edge_index = data.edge_index.long()
         x = data.x
 
         for conv in self.convs:
-            # print(f'x: {x.shape}') # [500, 95]
-            # print(f'edge_index: {edge_index.shape}') # [2, sth]
+            # print(f'x: {x.shape}')
+            # print(f'edge_index: {edge_index.shape}')
             x = conv(x, edge_index)
             # x = conv(x.T, edge_index)
-            # print(f'x: {x.shape}')
             x = F.dropout(x, self.dropout, training=self.training)
 
         out = global_add_pool(x, data.batch)
         out = self.bn(out)
         out = self.fc(out)
-        # print(f'out: {out.shape}') # [5, 64]
-        return out
-    
-    
-class GIN_cond(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dim, latent_dim, n_layers, dropout=0.2):
-        super().__init__()
-        self.dropout = dropout
-        self.input_dim = 95
-        print(input_dim, hidden_dim, latent_dim, n_layers)
-        self.convs = torch.nn.ModuleList()
-        self.convs.append(GINConv(nn.Sequential(nn.Linear(self.input_dim, hidden_dim),  
-                            nn.LeakyReLU(0.2),
-                            nn.BatchNorm1d(hidden_dim),
-                            nn.Linear(hidden_dim, hidden_dim), 
-                            nn.LeakyReLU(0.2))
-                            ))                        
-        for layer in range(n_layers-1):
-            self.convs.append(GINConv(nn.Sequential(nn.Linear(hidden_dim, hidden_dim),  
-                            nn.LeakyReLU(0.2),
-                            nn.BatchNorm1d(hidden_dim),
-                            nn.Linear(hidden_dim, hidden_dim), 
-                            nn.LeakyReLU(0.2))
-                            )) 
-
-        self.bn = nn.BatchNorm1d(hidden_dim)
-        self.fc = nn.Linear(hidden_dim, latent_dim)
-        
-
-    def forward(self, x, edge_index):
-        
-        # print(f'self.input_dim: {self.input_dim}')
-
-        for conv in self.convs:
-            print(f'x: {x.shape}')
-            print(f'edge_index: {edge_index.shape}')
-            x_after = conv(x, edge_index)
-            print(f'x_after: {x_after.shape}')
-            # x = conv(x.T, edge_index)
-            x_after = F.dropout(x_after, self.dropout, training=self.training)
-
-        out = global_add_pool(x_after, data.batch)
-        out = self.bn(out)
-        out = self.fc(out)
-        print(f'out: {out.shape}')
         return out
 
 
@@ -184,16 +139,9 @@ class AutoEncoder(nn.Module):
 class VariationalAutoEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim_enc, hidden_dim_dec, latent_dim, n_layers_enc, n_layers_dec, n_max_nodes):
         super(VariationalAutoEncoder, self).__init__()
-        # self.n_max_nodes = n_max_nodes
-        # self.input_dim = input_dim
-        # self.n_max_nodes = 48
-        # self.input_dim = 262
-        self.n_max_nodes = 100
-        self.input_dim = 95
-        # self.input_dim = 26
-        #self.encoder = GPS(input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
+        self.n_max_nodes = n_max_nodes
+        self.input_dim = input_dim
         self.encoder = GIN(self.input_dim, hidden_dim_enc, hidden_dim_enc, n_layers_enc)
-        #self.encoder = Powerful(input_dim=input_dim+1, num_layers=n_layers_enc, hidden=hidden_dim_enc, hidden_final=hidden_dim_enc, dropout_prob=0.0, simplified=False)
         self.fc_mu = nn.Linear(hidden_dim_enc, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim_enc, latent_dim)
         self.decoder = Decoder(latent_dim, hidden_dim_dec, n_layers_dec, n_max_nodes)
@@ -232,21 +180,24 @@ class VariationalAutoEncoder(nn.Module):
         return adj
 
     def loss_function(self, data, beta=0.05):
-        # print(self.input_dim)
-        # print(self.n_max_nodes)
-        # print(data)
-        x_g = self.encoder(data)
-        mu = self.fc_mu(x_g)
-        logvar = self.fc_logvar(x_g)
-        x_g = self.reparameterize(mu, logvar) # concat or sum fully connected layer apo ta feats tou graph
-        adj = self.decoder(x_g)
+        edge_index = data.edge_index
         
-        #A = data.A[:,:,:,0]
-        # print(f'x_g: {x_g.shape}')
-        # print(f'adj: {adj.shape}')
-        # print(f'data.A: {data.A.shape}')
-        recon = F.l1_loss(adj, data.A, reduction='sum')
-        kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        x_g = self.encoder(data)
+        data.edge_index = data.edge_index_cf
+        x_g_cf = self.encoder(data)
+        mu = self.fc_mu(x_g)
+        mu_cf = self.fc_mu(x_g_cf)
+        logvar = self.fc_logvar(x_g)
+        logvar_cf = self.fc_logvar(x_g_cf)
+        x_g = self.reparameterize(mu, logvar) # concat or sum fully connected layer apo ta feats tou graph
+        x_g_cf = self.reparameterize(mu_cf, logvar_cf)
+        adj = self.decoder(x_g)
+        adj_cf = self.decoder(x_g_cf)
+        
+        recon = F.l1_loss(adj, data.A, reduction='sum') + 0.0001 * F.l1_loss(adj_cf, data.A_cf, reduction='sum')
+        kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) - 0.5 * 0.0001 * torch.sum(1 + logvar_cf - mu_cf.pow(2) - logvar_cf.exp())
         loss = recon + beta*kld
+        
+        data.edge_index = edge_index
 
         return loss, recon, kld

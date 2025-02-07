@@ -82,7 +82,7 @@ def eval_autoencoder(test_loader_f, test_loader_cf, autoencoder, n_max_nodes, de
 
         for i in range(len(Gs_pairs)):
             K = wl_kernel.fit_transform(Gs_pairs[i])
-            # sims.append(K[0,1])
+            sims.append(K[0,1])
             
     print('Average similarity:', np.mean(sims))
 
